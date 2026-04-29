@@ -2,97 +2,105 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# Configuração da página
-st.set_page_config(page_title="Dashboard Ministerial", layout="wide")
+# Configuração da página para ocupar a tela toda
+st.set_page_config(page_title="Dashboard Ministerial - Igreja", layout="wide")
 
-# Estilo CSS para o Farol (Badges)
+# Estilo para os "Faróis" (Indicadores de tendência)
 st.markdown("""
     <style>
-    .farol { padding: 5px 15px; border-radius: 15px; color: white; font-weight: bold; float: right; }
-    .good { background-color: #27ae60; }
-    .bad { background-color: #c0392b; }
+    .farol { padding: 8px 15px; border-radius: 20px; color: white; font-weight: bold; font-size: 14px; float: right; }
+    .melhora { background-color: #27ae60; } /* Verde */
+    .piora { background-color: #c0392b; }   /* Vermelho */
+    .card-header { font-size: 18px; font-weight: bold; color: #2c3e50; text-align: center; border-bottom: 1px solid #eee; padding-bottom: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data
-def load_data():
-    # Caminho do seu arquivo principal (suba ele para o GitHub)
-    file_path = "Relatório financeiro_2026_BD.xlsx"
-    xl = pd.ExcelFile(file_path)
-    
-    data_dict = {}
+def processar_excel(file):
+    xl = pd.ExcelFile(file)
+    data = {}
     for sheet in xl.sheet_names:
-        # Lê a aba pulando as linhas de título do Excel
+        # Pula as linhas de título para pegar o cabeçalho real (geralmente linha 2 ou 3)
         df = pd.read_excel(xl, sheet_name=sheet, skiprows=1)
-        # Limpa colunas e nomes
         df.columns = [str(c).strip() for c in df.columns]
+        # Identifica a coluna da localidade (Coluna B no seu arquivo)
         if 'Unnamed: 1' in df.columns:
-            df = df.rename(columns={'Unnamed: 1': 'Casa de Oração'})
-        data_dict[sheet] = df
-    return data_dict
+            df = df.rename(columns={'Unnamed: 1': 'Localidade'})
+        data[sheet] = df
+    return data
 
-try:
-    db = load_data()
+# --- BARRA LATERAL ---
+st.sidebar.title("Configurações")
+uploaded_files = st.sidebar.file_uploader("Upload das Planilhas (.xlsx)", type="xlsx", accept_multiple_files=True)
+
+if uploaded_files:
+    # Consolidação de múltiplos arquivos enviados
+    db = {}
+    for f in uploaded_files:
+        db.update(processar_excel(f))
+
+    # Filtro de Localidade (Cidades)
+    # Tenta pegar as localidades de uma aba padrão como 'Água'
+    aba_referencia = next((s for s in db.keys() if 'Água' in s or 'Agua' in s), None)
     
-    # --- BARRA LATERAL (Filtros) ---
-    st.sidebar.header("Filtros")
-    # Pega lista de casas da aba Água como referência
-    lista_casas = sorted(db['Água']['Casa de Oração'].dropna().unique())
-    casa_sel = st.sidebar.selectbox("Selecione a Casa de Oração", lista_casas)
+    if aba_referencia:
+        lista_casas = sorted(db[aba_referencia]['Localidade'].dropna().unique())
+        casa_sel = st.sidebar.selectbox("Selecione a Casa de Oração", lista_casas)
 
-    st.title(f"Relatório Gerencial: {casa_sel}")
+        st.title(f"Relatório Gerencial: {casa_sel}")
 
-    # --- FUNÇÃO PARA CRIAR CADA CARD DO PDF ---
-    def criar_card(titulo, aba_nome, is_gasto=True):
-        df = db[aba_nome]
-        dados_casa = df[df['Casa de Oração'] == casa_sel].iloc[0]
-        
-        # Extração de valores (Média 24, 25 e meses de 26)
-        m24 = dados_casa.get('Média 2024', 0)
-        m25 = dados_casa.get('Média 2025', 0)
-        jan26 = dados_casa.get('2026-01-01', 0)
-        fev26 = dados_casa.get('2026-02-01', 0)
-        
-        # Lógica do Farol
-        variacao = ((m25 - m24) / m24 * 100) if m24 != 0 else 0
-        cor_farol = "good" if (variacao <= 0 if is_gasto else variacao >= 0) else "bad"
-        
-        col1, col2 = st.columns([3, 1])
-        with col1: st.subheader(titulo)
-        with col2: st.markdown(f'<span class="farol {cor_farol}">{variacao:.1f}%</span>', unsafe_allow_html=True)
-        
-        # Gráfico
-        fig = go.Figure(data=[
-            go.Bar(name='Médias', x=['Média 24', 'Média 25'], y=[m24, m25], marker_color='#bdc3c7'),
-            go.Bar(name='2026', x=['Jan/26', 'Fev/26'], y=[jan26, fev26], marker_color='#3498db')
-        ])
-        fig.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        # --- FUNÇÃO PARA GERAR OS GRÁFICOS DO PDF ---
+        def render_card(titulo, chave_aba, is_gasto=True):
+            try:
+                # Localiza a aba correta ignorando acentos
+                aba_real = next((s for s in db.keys() if chave_aba.upper() in s.upper()), None)
+                if not aba_real: return
+                
+                df = db[aba_real]
+                dados = df[df['Localidade'] == casa_sel].iloc[0]
 
-    # --- GRID DO DASHBOARD ---
-    c1, c2 = st.columns(2)
-    with c1: criar_card("Água e Esgoto", "Água")
-    with c2: criar_card("Manutenção", "Manutenção")
+                # Dados para o gráfico (Padrão do seu arquivo BD)
+                m24 = float(dados.get('Média 2024', 0))
+                m25 = float(dados.get('Média 2025', 0))
+                v1 = float(dados.get('2026-01-01', dados.get('jan/25', 0)))
+                v2 = float(dados.get('2026-02-01', dados.get('fev/25', 0)))
 
-    c3, c4 = st.columns(2)
-    with c3: criar_card("Energia Elétrica", "Energia")
-    with c4: criar_card("Alimentação", "Alimentação")
+                # Cálculo do Farol
+                var = ((m25 - m24) / m24 * 100) if m24 != 0 else 0
+                # Para gasto: variação negativa é melhora (verde). Para coleta: variação positiva é melhora.
+                is_good = (var <= 0) if is_gasto else (var >= 0)
+                classe_farol = "melhora" if is_good else "piora"
 
-    c5, c6 = st.columns(2)
-    with c5: criar_card("Coletas Total", "Coletas e Ofertas - Total", is_gasto=False)
-    with c6: criar_card("Coletas Per Capta", "Coletas e Ofertas - Per Capta", is_gasto=False)
+                col_t, col_f = st.columns([3, 1])
+                with col_t: st.markdown(f'<div class="card-header">{titulo}</div>', unsafe_allow_html=True)
+                with col_f: st.markdown(f'<span class="farol {classe_farol}">{var:+.1f}%</span>', unsafe_allow_html=True)
 
-    # --- SANTA CEIA (LARGURA TOTAL) ---
-    st.divider()
-    st.subheader("Participantes Santa Ceia")
-    df_ceia = db['Santa Ceia']
-    ceia_casa = df_ceia[df_ceia['Unnamed: 1'] == casa_sel].iloc[0]
-    anos = ['2021', '2022', '2023', '2024', '2025']
-    valores_ceia = [ceia_casa[ano] for ano in anos]
-    
-    fig_ceia = go.Figure(go.Bar(x=anos, y=valores_ceia, marker_color='#2c3e50'))
-    fig_ceia.update_layout(height=300, yaxis=dict(range=[min(valores_ceia)*0.9, max(valores_ceia)*1.1]))
-    st.plotly_chart(fig_ceia, use_container_width=True)
+                fig = go.Figure(data=[
+                    go.Bar(name='Médias', x=['Média 24', 'Média 25'], y=[m24, m25], marker_color='#bdc3c7'),
+                    go.Bar(name='Meses', x=['Jan', 'Fev'], y=[v1, v2], marker_color='#3498db')
+                ])
+                fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), showlegend=False, yaxis=dict(gridcolor='#eee'))
+                st.plotly_chart(fig, use_container_width=True)
+            except:
+                st.warning(f"Dados não encontrados para {titulo}")
 
-except Exception as e:
-    st.error(f"Erro ao carregar dados: {e}. Certifique-se de que os arquivos estão no repositório.")
+        # --- GRID DO DASHBOARD ---
+        c1, c2 = st.columns(2)
+        with c1: render_card("Água e Esgoto", "Água")
+        with c2: render_card("Manutenção", "Manutenção")
+
+        c3, c4 = st.columns(2)
+        with c3: render_card("Energia Elétrica", "Energia")
+        with c4: render_card("Alimentação", "Alimentação")
+
+        c5, c6 = st.columns(2)
+        with c5: render_card("Coletas Total", "Total", is_gasto=False)
+        with c6: render_card("Coletas Per Capta", "Per Capta", is_gasto=False)
+
+        # --- SANTA CEIA (RODAPÉ) ---
+        st.divider()
+        render_card("Participantes Santa Ceia", "Santa Ceia", is_gasto=False)
+
+    else:
+        st.info("Por favor, faça o upload do arquivo 'Relatório financeiro_2026_BD.xlsx' para iniciar.")
+else:
+    st.warning("Aguardando upload dos arquivos locais para gerar o relatório.")
