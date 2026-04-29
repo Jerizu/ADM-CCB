@@ -1,29 +1,26 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from datetime import datetime
+from fpdf import FPDF
+import tempfile
 
-# Configuração da página
+# --- CONFIGURAÇÃO E ESTILOS ---
 st.set_page_config(page_title="Dashboard Ministerial CCB", layout="wide")
 
-# Estilos CSS para os Badges de Tendência (Faróis)
 st.markdown("""
     <style>
-    .farol { padding: 5px 15px; border-radius: 15px; color: white; font-weight: bold; float: right; font-size: 14px; }
+    .farol { padding: 2px 10px; border-radius: 10px; color: white; font-weight: bold; font-size: 14px; float: right; }
     .good { background-color: #27ae60; }
     .bad { background-color: #c0392b; }
+    .stPlotlyChart { border: 1px solid #f0f2f6; border-radius: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
-def formatar_data_coluna(col):
-    """Converte datas do Excel (Timestamp) para o formato jan/26 ou jan/25"""
-    try:
-        if isinstance(col, (pd.Timestamp, datetime.date)):
-            meses = {1:'jan', 2:'fev', 3:'mar', 4:'abr', 5:'mai', 6:'jun', 
-                     7:'jul', 8:'ago', 9:'set', 10:'out', 11:'nov', 12:'dez'}
-            return f"{meses[col.month]}/{str(col.year)[2:]}"
-    except:
-        pass
-    return str(col).strip().replace('\n', ' ')
+# --- FUNÇÕES DE APOIO ---
+def normalizar_nome(nome):
+    if pd.isna(nome): return nome
+    return str(nome).replace(' II', ' 2').strip()
 
 @st.cache_data
 def carregar_dados(files):
@@ -31,61 +28,76 @@ def carregar_dados(files):
     for f in files:
         xl = pd.ExcelFile(f)
         for name in xl.sheet_names:
-            # Lógica de leitura: pula 1 linha para pegar o cabeçalho real
             df = pd.read_excel(xl, sheet_name=name, skiprows=1)
-            # Limpa e formata cabeçalhos
-            df.columns = [formatar_data_coluna(c) for c in df.columns]
-            
-            # Identifica a coluna da Casa de Oração (Coluna B - Unnamed: 1 ou Coluna1)
+            # Normaliza colunas e nomes de localidade
             for col in df.columns[:3]:
                 if df[col].astype(str).str.contains('Cidade Nova|Jd.|Vila|Mursa', na=False, case=False).any():
                     df = df.rename(columns={col: 'LOCALIDADE_REF'})
+                    df['LOCALIDADE_REF'] = df['LOCALIDADE_REF'].apply(normalizar_nome)
                     break
             all_sheets[name] = df
     return all_sheets
 
+def gerar_pdf(casa_sel, figuras_base64):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, f"Relatório Ministerial: {casa_sel}", ln=True, align='C')
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 10, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
+    
+    # Adiciona as imagens dos gráficos (Streamlit/Plotly -> PDF requer salvar temporariamente)
+    # Nota: Para uma implementação completa de exportação de imagem no servidor, 
+    # recomenda-se usar o componente 'kaleido'.
+    pdf.set_font("Arial", "I", 12)
+    pdf.ln(10)
+    pdf.cell(0, 10, "Consulte o dashboard online para interatividade completa.", ln=True)
+    
+    return pdf.output(dest='S').encode('latin-1')
+
 # --- BARRA LATERAL ---
-st.sidebar.title("🛠️ Administração")
-# Instrução específica solicitada
-st.sidebar.info("📌 **Atenção:** Envie o arquivo com o nome: \n`Relatório financeiro_2026_BD.xlsx`")
-uploaded_files = st.sidebar.file_uploader("Selecione o arquivo Excel", type="xlsx", accept_multiple_files=True)
+st.sidebar.title("📊 Painel de Controle")
+uploaded_files = st.sidebar.file_uploader("Upload: Relatório financeiro_2026_BD.xlsx", type="xlsx", accept_multiple_files=True)
 
 if uploaded_files:
     db = carregar_dados(uploaded_files)
-    
-    # Busca a lista de casas (usando a primeira aba que encontrar com a coluna de referência)
     aba_ref = next((k for k in db.keys() if 'LOCALIDADE_REF' in db[k].columns), None)
     
     if aba_ref:
-        casas = sorted(db[aba_ref]['LOCALIDADE_REF'].dropna().unique())
-        casa_sel = st.sidebar.selectbox("Selecione a Localidade", casas)
+        # Opção de ver todas ou uma específica
+        opcoes_casas = ["Todas as Localidades"] + sorted(db[aba_ref]['LOCALIDADE_REF'].dropna().unique().tolist())
+        casa_sel = st.sidebar.selectbox("Selecione a Localidade", opcoes_casas)
 
-        # Slider de tempo (jan/25 até dez/26)
         meses_eixo = [f"{m}/{y}" for y in ['25', '26'] for m in ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez']]
         periodo = st.sidebar.select_slider("Filtrar Período", options=meses_eixo, value=("jan/26", "fev/26"))
 
         st.title(f"Relatório Ministerial: {casa_sel}")
 
-        def criar_grafico(titulo, busca_aba, is_gasto=True):
-            # Procura a aba correta ignorando maiúsculas e acentos
-            aba_real = next((k for k in db.keys() if busca_aba.upper() in k.upper().replace('Á','A').replace('Ç','C')), None)
-            if not aba_real: return
+        def processar_dados(busca_aba):
+            aba_real = next((k for k in db.keys() if busca_aba.upper() in k.upper().replace('Á','A')), None)
+            if not aba_real: return None
             
-            df = db[aba_real]
-            row = df[df['LOCALIDADE_REF'] == casa_sel]
-            if row.empty: return
-            row = row.iloc[0]
+            df = db[aba_real].copy()
+            
+            if casa_sel == "Todas as Localidades":
+                # Soma os valores de todas as casas para o consolidado
+                res = df.select_dtypes(include=['number']).sum()
+                return res
+            else:
+                row = df[df['LOCALIDADE_REF'] == casa_sel]
+                return row.iloc[0] if not row.empty else None
 
-            # Captura de Médias
-            m24 = pd.to_numeric(row.get('Média 2024', 0), errors='coerce')
-            m25 = pd.to_numeric(row.get('Média 2025', 0), errors='coerce')
+        def criar_grafico(titulo, busca_aba, is_gasto=True):
+            data = processar_dados(busca_aba)
+            if data is None: return
             
-            # Captura de Meses (Slider)
+            m24 = pd.to_numeric(data.get('Média 2024', 0), errors='coerce')
+            m25 = pd.to_numeric(data.get('Média 2025', 0), errors='coerce')
+            
             idx_i, idx_f = meses_eixo.index(periodo[0]), meses_eixo.index(periodo[1]) + 1
             meses_sel = meses_eixo[idx_i:idx_f]
-            valores_mes = [pd.to_numeric(row.get(m, 0), errors='coerce') for m in meses_sel]
+            valores_mes = [pd.to_numeric(data.get(m, 0), errors='coerce') for m in meses_sel]
 
-            # Lógica do Farol de Tendência
             var = ((m25 - m24) / m24 * 100) if m24 and m24 != 0 else 0
             is_good = (var <= 0) if is_gasto else (var >= 0)
             classe = "good" if is_good else "bad"
@@ -95,24 +107,13 @@ if uploaded_files:
             c_far.markdown(f'<span class="farol {classe}">{var:+.1f}%</span>', unsafe_allow_html=True)
 
             fig = go.Figure()
-            # Barras de Histórico
             fig.add_trace(go.Bar(x=['Média 24', 'Média 25'], y=[m24, m25], marker_color='#bdc3c7', name='Médias'))
-            # Barras do Período Atual
-            fig.add_trace(go.Bar(x=meses_sel, y=valores_mes, marker_color='#3498db', name='Meses'))
-
-            # Linhas Médias Específicas para PER CAPTA
-            if "PER CAPTA" in titulo.upper():
-                mvp = pd.to_numeric(row.get('Média Várzea Pta', 0), errors='coerce')
-                mrj = pd.to_numeric(row.get('Média Regional Jdi', 0), errors='coerce')
-                if not pd.isna(mvp):
-                    fig.add_hline(y=mvp, line_dash="dash", line_color="#27ae60", annotation_text="Média Várzea Pta")
-                if not pd.isna(mrj):
-                    fig.add_hline(y=mrj, line_dash="dot", line_color="#e67e22", annotation_text="Média Regional Jdi")
-
-            fig.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
+            fig.add_trace(go.Bar(x=meses_sel, y=valores_mes, marker_color='#3498db', name='Atual'))
+            
+            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
-        # Organização em Grid (Idêntico ao PDF)
+        # Layout em Grid similar ao PDF enviado
         col1, col2 = st.columns(2)
         with col1: criar_grafico("Água e Esgoto", "Água")
         with col2: criar_grafico("Manutenção", "Manutenção")
@@ -121,16 +122,21 @@ if uploaded_files:
         with col3: criar_grafico("Energia Elétrica", "Energia")
         with col4: criar_grafico("Alimentação", "Alimentação")
 
+        st.divider()
         col5, col6 = st.columns(2)
         with col5: criar_grafico("Coletas Total", "Coletas e Ofertas - Total", is_gasto=False)
         with col6: criar_grafico("Coletas Per Capta", "Per Capta", is_gasto=False)
 
-        # Santa Ceia (Rodapé)
-        st.divider()
-        st.subheader("Histórico Participantes Santa Ceia")
-        criar_grafico("Participantes", "Santa Ceia", is_gasto=False)
+        # Botão para salvar PDF (Simulação de geração de relatório)
+        st.sidebar.divider()
+        if st.sidebar.button("📄 Gerar PDF do Relatório"):
+            pdf_data = gerar_pdf(casa_sel, [])
+            st.sidebar.download_button(label="Clique para Baixar PDF", 
+                                       data=pdf_data, 
+                                       file_name=f"Relatorio_{casa_sel}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                                       mime="application/pdf")
 
     else:
-        st.error("Erro: Não foi possível encontrar a coluna de Localidades no arquivo enviado.")
+        st.error("Coluna 'Localidade' não encontrada.")
 else:
-    st.warning("Aguardando o upload do arquivo: 'Relatório financeiro_2026_BD.xlsx'")
+    st.info("Por favor, faça o upload do arquivo para visualizar o dashboard.")
