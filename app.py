@@ -1,123 +1,132 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
 
-st.set_page_config(page_title="Dashboard Ministerial v2", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Dashboard Administrativo Igreja", layout="wide")
 
-# Estilos CSS para os Faróis
+# Estilo dos Faróis (Trend Badges)
 st.markdown("""
     <style>
-    .farol { padding: 5px 15px; border-radius: 15px; color: white; font-weight: bold; float: right; font-size: 14px; }
-    .good { background-color: #27ae60; }
-    .bad { background-color: #c0392b; }
+    .farol { padding: 5px 12px; border-radius: 15px; color: white; font-weight: bold; float: right; font-size: 13px; }
+    .status-bom { background-color: #27ae60; }
+    .status-ruim { background-color: #c0392b; }
     </style>
 """, unsafe_allow_html=True)
 
-def limpar_nome_coluna(col):
-    return str(col).strip().replace('\n', ' ')
+def extrair_valor_mes(row, mes_ref):
+    """ Tenta encontrar o valor do mês independente do formato da coluna (jan/26, 2026-01-01, etc) """
+    # Normaliza a busca para minúsculo e remove espaços
+    for col in row.index:
+        col_str = str(col).lower().strip()
+        if mes_ref.lower() in col_str:
+            return pd.to_numeric(row[col], errors='coerce')
+    return 0
 
 @st.cache_data
-def carregar_e_limpar(file):
-    xl = pd.ExcelFile(file)
-    sheets_dict = {}
-    for name in xl.sheet_names:
-        # Lendo a partir da linha onde geralmente estão os cabeçalhos nos seus arquivos
-        df = pd.read_excel(xl, sheet_name=name, skiprows=1)
-        df.columns = [limpar_nome_coluna(c) for c in df.columns]
-        # Renomeia a coluna B (que vem como Unnamed: 1) para Localidade
-        if 'Unnamed: 1' in df.columns:
-            df = df.rename(columns={'Unnamed: 1': 'Localidade'})
-        elif 'Coluna1' in df.columns:
-            df = df.rename(columns={'Coluna1': 'Localidade'})
-        sheets_dict[name] = df
-    return sheets_dict
-
-# --- BARRA LATERAL ---
-st.sidebar.title("Configurações")
-files = st.sidebar.file_uploader("Suba 'Relatório financeiro_2026_BD.xlsx'", type="xlsx", accept_multiple_files=True)
-
-if files:
-    db = {}
+def carregar_dados(files):
+    all_data = {}
     for f in files:
-        db.update(carregar_e_limpar(f))
+        xl = pd.ExcelFile(f)
+        for sheet in xl.sheet_names:
+            # Pula as linhas de título para pegar o cabeçalho real
+            df = pd.read_excel(xl, sheet_name=sheet, skiprows=1)
+            # Limpa nomes de colunas
+            df.columns = [str(c).strip() for c in df.columns]
+            # Padroniza a coluna de localidade (Coluna B nos seus arquivos)
+            if 'Unnamed: 1' in df.columns:
+                df = df.rename(columns={'Unnamed: 1': 'Localidade'})
+            all_data[sheet] = df
+    return all_data
 
-    # Identificar aba de referência para pegar a lista de Casas de Oração
-    ref_key = next((k for k in db.keys() if "Água" in k or "Energia" in k), None)
+# --- UI INTERFACE ---
+st.sidebar.title("Configuração do Dashboard")
+uploaded_files = st.sidebar.file_uploader("Selecione os arquivos Excel", type="xlsx", accept_multiple_files=True)
+
+if uploaded_files:
+    db = carregar_dados(uploaded_files)
     
-    if ref_key:
-        casas = sorted(db[ref_key]['Localidade'].dropna().unique())
-        casa_sel = st.sidebar.selectbox("Casa de Oração", casas)
+    # Identificar abas disponíveis
+    abas = list(db.keys())
+    aba_ref = next((a for a in abas if "ÁGUA" in a.upper() or "ENERGIA" in a.upper()), abas[0])
+    
+    # Filtro de Localidade
+    lista_casas = sorted(db[aba_ref]['Localidade'].dropna().unique())
+    # Remove nomes que pareçam cabeçalhos
+    lista_casas = [c for c in lista_casas if not any(x in str(c).upper() for x in ["TOTAL", "MÉDIA", "COLUNA"])]
+    
+    casa_sel = st.sidebar.selectbox("Casa de Oração", lista_casas)
+    
+    # Seleção de Período (Meses)
+    meses_lista = ["jan/26", "fev/26", "mar/26", "abr/26", "mai/26", "jun/26"]
+    periodo = st.sidebar.select_slider("Selecione o Período", options=meses_lista, value=("jan/26", "fev/26"))
+
+    st.header(f"Gestão Financeira: {casa_sel}")
+
+    def render_card_pdf(titulo, nome_aba, is_gasto=True):
+        # Localiza a aba correta ignorando acentos
+        aba_real = next((a for a in abas if nome_aba.upper() in a.upper()), None)
+        if not aba_real: return
         
-        # --- FILTRO DE LINHA DO TEMPO ---
-        # Definindo o período baseado nas colunas de data que encontramos nos seus arquivos
-        meses_disponiveis = ["jan/25", "fev/25", "mar/25", "abr/25", "mai/25", "jun/25", "jul/25", "ago/25", "set/25", "out/25", "nov/25", "dez/25"]
-        periodo = st.sidebar.select_slider("Linha do Tempo (Meses 2025/26)", options=meses_disponiveis, value=("jan/25", "fev/25"))
+        df = db[aba_real]
+        dados_casa = df[df['Localidade'] == casa_sel]
+        if dados_casa.empty: return
+        
+        row = dados_casa.iloc[0]
+        
+        # 1. Pegar Médias Históricas
+        m24 = pd.to_numeric(row.get('Média 2024', 0), errors='coerce')
+        m25 = pd.to_numeric(row.get('Média 2025', 0), errors='coerce')
+        
+        # 2. Pegar Meses do Período Selecionado
+        idx_ini = meses_lista.index(periodo[0])
+        idx_fim = meses_lista.index(periodo[1]) + 1
+        meses_atuais = meses_lista[idx_ini:idx_fim]
+        valores_atuais = [extrair_valor_mes(row, m) for m in meses_atuais]
 
-        st.title(f"Relatório: {casa_sel}")
+        # 3. Cálculo do Farol (Média 25 vs 24)
+        var = ((m25 - m24) / m24 * 100) if m24 != 0 else 0
+        is_bom = (var <= 0) if is_gasto else (var >= 0)
+        classe = "status-bom" if is_bom else "status-ruim"
 
-        def render_grafico(titulo, aba_key, is_gasto=True):
-            aba_real = next((k for k in db.keys() if aba_key.upper() in k.upper()), None)
-            if not aba_real: return
-            
-            df = db[aba_real]
-            row = df[df['Localidade'] == casa_sel]
-            
-            if row.empty: return
-            row = row.iloc[0]
+        # HTML do Título + Farol
+        col_t, col_f = st.columns([3, 1])
+        with col_t: st.markdown(f"**{titulo}**")
+        with col_f: st.markdown(f'<span class="farol {classe}">{var:+.1f}%</span>', unsafe_allow_html=True)
 
-            # Captura de dados históricos
-            m24 = pd.to_numeric(row.get('Média 2024', 0), errors='coerce')
-            m25 = pd.to_numeric(row.get('Média 2025', 0), errors='coerce')
-            
-            # Captura de meses selecionados no slider
-            idx_inicio = meses_disponiveis.index(periodo[0])
-            idx_fim = meses_disponiveis.index(periodo[1]) + 1
-            meses_selecionados = meses_disponiveis[idx_inicio:idx_fim]
-            
-            valores_meses = [pd.to_numeric(row.get(m, 0), errors='coerce') for m in meses_selecionados]
+        # Gráfico
+        fig = go.Figure()
+        # Médias em Cinza
+        fig.add_trace(go.Bar(x=['Média 24', 'Média 25'], y=[m24, m25], marker_color='#bdc3c7', name="Médias"))
+        # Meses em Azul
+        fig.add_trace(go.Bar(x=meses_atuais, y=valores_atuais, marker_color='#3498db', name="Realizado"))
 
-            # Farol
-            variacao = ((m25 - m24) / m24 * 100) if m24 and m24 != 0 else 0
-            cor = "good" if (variacao <= 0 if is_gasto else variacao >= 0) else "bad"
-            
-            c_label, c_farol = st.columns([3,1])
-            c_label.markdown(f"**{titulo}**")
-            c_farol.markdown(f'<span class="farol {cor}">{variacao:+.1f}%</span>', unsafe_allow_html=True)
+        # Linhas de Meta (Apenas para Per Capta)
+        if "PER CAPTA" in titulo.upper():
+            meta_vpta = pd.to_numeric(row.get('Média Várzea Pta', 0), errors='coerce')
+            meta_jdi = pd.to_numeric(row.get('Média Regional Jdi', 0), errors='coerce')
+            if meta_vpta: fig.add_hline(y=meta_vpta, line_dash="dash", line_color="green", annotation_text="Meta VPTA")
+            if meta_jdi: fig.add_hline(y=meta_jdi, line_dash="dot", line_color="orange", annotation_text="Meta JDI")
 
-            fig = go.Figure()
-            # Barras Cinzas (Médias)
-            fig.add_trace(go.Bar(x=['Méd. 24', 'Méd. 25'], y=[m24, m25], marker_color='#bdc3c7', name="Médias"))
-            # Barras Azuis (Meses)
-            fig.add_trace(go.Bar(x=meses_selecionados, y=valores_meses, marker_color='#3498db', name="Meses"))
+        fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
 
-            # Adição de Linhas Médias para Per Capta
-            if "PER CAPTA" in titulo.upper():
-                mvp = pd.to_numeric(row.get('Média Várzea Pta', 0), errors='coerce')
-                mrj = pd.to_numeric(row.get('Média Regional Jdi', 0), errors='coerce')
-                fig.add_hline(y=mvp, line_dash="dash", line_color="green", annotation_text="Média VPTA")
-                fig.add_hline(y=mrj, line_dash="dot", line_color="orange", annotation_text="Média JDI")
+    # Grid de 2 colunas como no PDF
+    c1, c2 = st.columns(2)
+    with c1: render_card_pdf("Água e Esgoto", "Água")
+    with c2: render_card_pdf("Manutenção", "Manutenção")
 
-            fig.update_layout(height=300, margin=dict(l=0,r=0,t=20,b=0), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+    c3, c4 = st.columns(2)
+    with c3: render_card_pdf("Energia Elétrica", "Energia")
+    with c4: render_card_pdf("Alimentação", "Alimentação")
 
-        # Layout em Grid
-        col1, col2 = st.columns(2)
-        with col1: render_grafico("Água e Esgoto", "Água")
-        with col2: render_grafico("Manutenção", "Manutenção")
+    c5, c6 = st.columns(2)
+    with c5: render_card_pdf("Coletas Total", "Total", is_gasto=False)
+    with c6: render_card_pdf("Coletas Per Capta", "Per Capta", is_gasto=False)
 
-        col3, col4 = st.columns(2)
-        with col3: render_grafico("Energia Elétrica", "Energia")
-        with col4: render_grafico("Alimentação", "Alimentação")
-
-        col5, col6 = st.columns(2)
-        with col5: render_grafico("Coletas Total", "Coletas e Ofertas - Total", is_gasto=False)
-        with col6: render_grafico("Coletas Per Capta", "Per Capta", is_gasto=False)
-
-        # Santa Ceia
-        st.divider()
-        st.subheader("Santa Ceia (Histórico)")
-        render_grafico("Participantes", "Santa Ceia", is_gasto=False)
+    # Santa Ceia (Histórico)
+    st.divider()
+    render_card_pdf("Participantes Santa Ceia", "Santa Ceia", is_gasto=False)
 
 else:
-    st.info("Aguardando upload do arquivo 'Relatório financeiro_2026_BD.xlsx' para gerar o dashboard.")
+    st.info("Aguardando upload do arquivo 'Relatório financeiro_2026_BD.xlsx'...")
