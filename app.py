@@ -44,16 +44,16 @@ def carregar_dados(uploaded_files):
             all_sheets[name] = df
     return all_sheets
 
-files = st.sidebar.file_uploader("Upload Relatórios Excel", type="xlsx", accept_multiple_files=True)
+files = st.sidebar.file_uploader("Upload Excel", type="xlsx", accept_multiple_files=True)
 
 if files:
     db = carregar_dados(files)
     aba_ref = next((k for k in db.keys() if 'LOCALIDADE_REF' in db[k].columns), list(db.keys())[0])
     casas = ["Todas as Localidades"] + sorted([str(c) for c in db[aba_ref]['LOCALIDADE_REF'].unique()])
-    casa_sel = st.sidebar.selectbox("Selecionar Localidade", casas)
+    casa_sel = st.sidebar.selectbox("Localidade", casas)
     
     meses_eixo = [f"{m}/{y}" for y in ['25', '26'] for m in ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez']]
-    periodo = st.sidebar.select_slider("Janela de Visualização", options=meses_eixo, value=("jan/26", "fev/26"))
+    periodo = st.sidebar.select_slider("Período", options=meses_eixo, value=("jan/26", "fev/26"))
 
     resumo_farol = []
 
@@ -61,6 +61,9 @@ if files:
         aba_real = next((k for k in db.keys() if normalizar(busca_aba) in normalizar(k)), None)
         if not aba_real: return
         df = db[aba_real].copy()
+
+        # Benchmark: Média da coluna "Média 2026" de todas as igrejas (Média Várzea)
+        media_varzea_2026 = df['Média 2026'].mean() if 'Média 2026' in df.columns else 0
 
         if casa_sel == "Todas as Localidades":
             dados = df.select_dtypes(include=['number']).mean() if especial != "santa_ceia" else df.select_dtypes(include=['number']).sum()
@@ -70,7 +73,7 @@ if files:
         
         if dados is None: return
 
-        # --- SANTA CEIA ---
+        # --- SANTA CEIA (DESIGN IGUAL À FOTO) ---
         if especial == "santa_ceia":
             anos = ['2021', '2022', '2023', '2024', '2025']
             y_vals = [int(dados.get(a, 0)) for a in anos]
@@ -80,26 +83,26 @@ if files:
             p24_25 = ((v25 - v24) / v24 * 100) if v24 else 0
 
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=anos, y=y_vals, text=y_vals, textposition='auto', marker_color='#2c3e50'))
+            fig.add_trace(go.Bar(x=anos, y=y_vals, text=y_vals, textposition='auto', marker_color='#2c3e50', name="Participantes"))
             
-            # Linha 1: 2021 -> 2025 (Tracejada Vermelha)
+            # Linha 1: 2021 -> 2025 (Tendência Longa)
             fig.add_trace(go.Scatter(x=['2021', '2025'], y=[y_vals[0], y_vals[-1]], mode='lines+text',
                                      line=dict(color='red', width=2, dash='dash'),
-                                     text=["", f"{p21_25:+.1f}%"], textposition="top right"))
+                                     text=["", f"Total: {p21_25:+.1f}%"], textposition="top right"))
             
-            # Linha 2: 2024 -> 2025 (Sólida Laranja)
+            # Linha 2: 2024 -> 2025 (Variação Anual)
             fig.add_trace(go.Scatter(x=['2024', '2025'], y=[y_vals[3], y_vals[4]], mode='lines+text',
                                      line=dict(color='orange', width=3),
-                                     text=["", f"{p24_25:+.1f}%"], textposition="bottom center"))
+                                     text=["", f"Anual: {p24_25:+.1f}%"], textposition="bottom center"))
 
-            fig.update_layout(height=400, showlegend=False, title="Variação de Participantes")
+            fig.update_layout(height=400, showlegend=False, margin=dict(t=50))
             st.plotly_chart(fig, use_container_width=True)
             
             if casa_sel == "Todas as Localidades":
                 st.dataframe(df[['LOCALIDADE_REF'] + anos].set_index('LOCALIDADE_REF'), use_container_width=True)
             return
 
-        # --- FINANCEIRO & PER CAPTA ---
+        # --- FINANCEIRO E PER CAPTA ---
         m25, m26 = dados.get('Média 2025', 0), dados.get('Média 2026', 0)
         var = ((m26 - m25) / m25 * 100) if m25 else 0
         
@@ -107,17 +110,16 @@ if files:
         cor_bola = "dot-green" if status_pos else "dot-red"
         bola_html = f'<span class="dot {cor_bola}"></span>'
 
-        # Referências Farol
-        ref_varzea = 22.28 if especial == "per_capta" else (df['Média 2025'].mean() if 'Média 2025' in df else 0)
-        ref_jdi = "35.50" if especial == "per_capta" else "-"
-
+        # Lógica de Médias Regional para a Tabela
+        m_jdi = "35.50" if especial == "per_capta" else "-"
+        
         resumo_farol.append({
-            "Métrica": titulo,
+            "Indicador": titulo,
             "Farol": bola_html,
-            "Média 2026": f"{m26:.2f}",
+            "Média Local 2026": f"{m26:.2f}",
             "Var. 25/26": f"{var:+.1f}%",
-            "Média Várzea": f"{ref_varzea:.2f}" if isinstance(ref_varzea, float) else ref_varzea,
-            "Média Reg. Jdi": ref_jdi
+            "Média Várzea (Regional)": f"{media_varzea_2026:.2f}",
+            "Média Jundiaí": m_jdi
         })
 
         st.markdown(f"**{titulo}**")
@@ -129,13 +131,13 @@ if files:
         fig.add_trace(go.Bar(x=meses_sel, y=[dados.get(m, 0) for m in meses_sel], marker_color='#3498db'))
         
         if especial == "per_capta":
-            fig.add_hline(y=float(ref_varzea), line_dash="dash", line_color="orange", annotation_text="Média Várzea")
-            fig.add_hline(y=float(ref_jdi), line_dash="dot", line_color="red", annotation_text="Média Jdi")
+            fig.add_hline(y=media_varzea_2026, line_dash="dash", line_color="orange", annotation_text="Média Várzea")
+            fig.add_hline(y=35.50, line_dash="dot", line_color="red", annotation_text="Regional Jdi")
 
-        fig.update_layout(height=260, barmode='group', showlegend=False, margin=dict(l=10,r=10,t=20,b=10))
+        fig.update_layout(height=280, barmode='group', showlegend=False, margin=dict(l=10,r=10,t=20,b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-    # Layout Grid
+    # Renderização Grid
     c1, c2 = st.columns(2)
     with c1: criar_grafico("Água e Esgoto", "Água")
     with c2: criar_grafico("Energia Elétrica", "Energia")
@@ -148,15 +150,15 @@ if files:
     with c5: criar_grafico("Coletas Total", "Total", is_gasto=False)
     with c6: criar_grafico("Per Capta", "Per Capta", is_gasto=False, especial="per_capta")
 
-    # --- TABELA DE FAROL FINAL ---
+    # --- TABELA DE FAROL (Ajustada) ---
     st.subheader("🚩 Farol de Performance")
     if resumo_farol:
         df_farol = pd.DataFrame(resumo_farol)
         st.write(df_farol.to_html(escape=False, index=False), unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("📊 Histórico Santa Ceia")
+    st.subheader("📊 Evolução Santa Ceia")
     criar_grafico("Santa Ceia", "Santa Ceia", especial="santa_ceia")
 
 else:
-    st.info("Por favor, carregue o arquivo Excel para visualizar o relatório.")
+    st.info("Aguardando upload dos arquivos.")
