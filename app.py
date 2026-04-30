@@ -27,6 +27,8 @@ def carregar_dados(uploaded_files):
         xl = pd.ExcelFile(f)
         for name in xl.sheet_names:
             df = pd.read_excel(xl, sheet_name=name, skiprows=1)
+            
+            # Normalizar Cabeçalhos
             novas_cols = []
             for col in df.columns:
                 if isinstance(col, (datetime, pd.Timestamp)):
@@ -35,10 +37,13 @@ def carregar_dados(uploaded_files):
                 else:
                     novas_cols.append(str(col).strip())
             df.columns = novas_cols
+            
+            # Identificar Localidade
             for col in df.columns[:5]:
                 if df[col].astype(str).str.contains('Cidade Nova|Jd.|Vila|Mursa', na=False, case=False).any():
                     df = df.rename(columns={col: 'LOCALIDADE_REF'})
-                    df['LOCALIDADE_REF'] = df['LOCALIDADE_REF'].astype(str).str.replace(' II', ' 2', regex=False).strip()
+                    # CORREÇÃO DO ERRO: Adicionado .str antes do .strip()
+                    df['LOCALIDADE_REF'] = df['LOCALIDADE_REF'].astype(str).str.replace(' II', ' 2', regex=False).str.strip()
                     df = df[~df['LOCALIDADE_REF'].isin(['nan', 'None', 'Unnamed: 1'])]
                     break
             all_sheets[name] = df
@@ -46,7 +51,7 @@ def carregar_dados(uploaded_files):
 
 # --- INTERFACE ---
 st.sidebar.title("📊 Painel de Controle")
-files = st.sidebar.file_uploader("Upload Relatório", type="xlsx", accept_multiple_files=True)
+files = st.sidebar.file_uploader("Upload Relatório Excel", type="xlsx", accept_multiple_files=True)
 
 if files:
     db = carregar_dados(files)
@@ -64,14 +69,14 @@ if files:
         if not aba_real: return
         df = db[aba_real].copy()
 
-        # --- LÓGICA SANTA CEIA (SOMA TOTAL E VALORES INTEIROS) ---
+        # --- LÓGICA SANTA CEIA (SOMA TOTAL) ---
         if especial == "santa_ceia":
             anos = ['2021', '2022', '2023', '2024', '2025']
             if casa_sel == "Todas as Localidades":
                 dados_ceia = df[anos].sum()
-                st.subheader("Soma Total de Participantes")
             else:
-                dados_ceia = df[df['LOCALIDADE_REF'] == casa_sel][anos].iloc[0]
+                linha = df[df['LOCALIDADE_REF'] == casa_sel]
+                dados_ceia = linha[anos].iloc[0] if not linha.empty else pd.Series(0, index=anos)
             
             valores = [int(v) for v in dados_ceia]
             fig = go.Figure(go.Bar(x=anos, y=valores, text=valores, textposition='auto', marker_color='#2c3e50'))
@@ -79,17 +84,20 @@ if files:
             st.plotly_chart(fig, use_container_width=True)
             
             if casa_sel == "Todas as Localidades":
-                st.markdown("**Tabela Detalhada por Localidade (Santa Ceia)**")
+                st.markdown("**Tabela Detalhada (Santa Ceia)**")
                 df_tabela = df[['LOCALIDADE_REF'] + anos].copy()
                 for a in anos: df_tabela[a] = df_tabela[a].apply(lambda x: f"{int(x)}" if pd.notnull(x) else "0")
                 st.dataframe(df_tabela.set_index('LOCALIDADE_REF'), use_container_width=True)
             return
 
-        # --- LÓGICA MÉDIA GERAL PARA OS DEMAIS ---
+        # --- LÓGICA DE MÉDIA PARA TODAS AS LOCALIDADES ---
         if casa_sel == "Todas as Localidades":
             dados = df.select_dtypes(include=['number']).mean()
         else:
-            dados = df[df['LOCALIDADE_REF'] == casa_sel].select_dtypes(include=['number']).iloc[0]
+            linha = df[df['LOCALIDADE_REF'] == casa_sel]
+            dados = linha.select_dtypes(include=['number']).iloc[0] if not linha.empty else None
+
+        if dados is None: return
 
         m25, m26 = dados.get('Média 2025', 0), dados.get('Média 2026', 0)
         idx_i, idx_f = meses_eixo.index(periodo[0]), meses_eixo.index(periodo[1]) + 1
@@ -104,12 +112,10 @@ if files:
         fig.add_trace(go.Bar(x=['Média 25', 'Média 26'], y=[m25, m26], marker_color='#bdc3c7', name='Médias'))
         fig.add_trace(go.Bar(x=meses_sel, y=valores_mes, marker_color='#3498db', name='Meses'))
 
-        # --- PER CAPTA: RÓTULOS LIMPOS E LEGENDA ---
         if especial == "per_capta":
             v_varzea, v_reg = 22.28, 35.50
             fig.add_hline(y=v_varzea, line_dash="dash", line_color="orange", annotation_text=f"{v_varzea}", annotation_position="top right")
             fig.add_hline(y=v_reg, line_dash="dot", line_color="red", annotation_text=f"{v_reg}", annotation_position="bottom right")
-            
             st.plotly_chart(fig, use_container_width=True)
             st.markdown(f"""
                 <div class="legenda-container">
@@ -121,10 +127,11 @@ if files:
             fig.update_layout(height=280, barmode='group', showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-    # LAYOUT
+    # --- GRID DE GRÁFICOS ---
     c1, c2 = st.columns(2)
     with c1: criar_grafico("Água e Esgoto", "Água")
     with c2: criar_grafico("Energia Elétrica", "Energia")
+    
     c3, c4 = st.columns(2)
     with c3: criar_grafico("Manutenção", "Manutenção")
     with c4: criar_grafico("Alimentação", "Alimentação")
@@ -137,3 +144,6 @@ if files:
     st.divider()
     st.subheader("📊 Histórico Santa Ceia (Total de Participantes)")
     criar_grafico("Evolução Santa Ceia", "Santa Ceia", especial="santa_ceia")
+
+else:
+    st.info("Aguardando upload do arquivo Excel.")
