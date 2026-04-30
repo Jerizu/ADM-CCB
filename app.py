@@ -13,6 +13,7 @@ st.markdown("""
     .dot-green { background-color: #27ae60; }
     .dot-red { background-color: #c0392b; }
     .stTable { width: 100%; font-size: 14px; }
+    .legenda-container { display: flex; gap: 20px; justify-content: center; font-size: 13px; margin-top: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +63,7 @@ if files:
         if not aba_real: return
         df = db[aba_real].copy()
 
-        # Benchmark: Média da coluna "Média 2026" de todas as igrejas (Média Várzea)
+        # Benchmark: Média da Regional (Várzea)
         media_varzea_2026 = df['Média 2026'].mean() if 'Média 2026' in df.columns else 0
 
         if casa_sel == "Todas as Localidades":
@@ -73,7 +74,7 @@ if files:
         
         if dados is None: return
 
-        # --- SANTA CEIA (DESIGN IGUAL À FOTO) ---
+        # --- SANTA CEIA (AJUSTE DE LEGENDA E SOBREPOSIÇÃO) ---
         if especial == "santa_ceia":
             anos = ['2021', '2022', '2023', '2024', '2025']
             y_vals = [int(dados.get(a, 0)) for a in anos]
@@ -85,18 +86,22 @@ if files:
             fig = go.Figure()
             fig.add_trace(go.Bar(x=anos, y=y_vals, text=y_vals, textposition='auto', marker_color='#2c3e50', name="Participantes"))
             
-            # Linha 1: 2021 -> 2025 (Tendência Longa)
-            fig.add_trace(go.Scatter(x=['2021', '2025'], y=[y_vals[0], y_vals[-1]], mode='lines+text',
-                                     line=dict(color='red', width=2, dash='dash'),
-                                     text=["", f"Total: {p21_25:+.1f}%"], textposition="top right"))
+            # Linhas de Tendência sem texto interno para evitar sobreposição
+            fig.add_trace(go.Scatter(x=['2021', '2025'], y=[y_vals[0], y_vals[-1]], mode='lines',
+                                     line=dict(color='red', width=2, dash='dash'), name=f"Var. Total (21-25): {p21_25:+.1f}%"))
             
-            # Linha 2: 2024 -> 2025 (Variação Anual)
-            fig.add_trace(go.Scatter(x=['2024', '2025'], y=[y_vals[3], y_vals[4]], mode='lines+text',
-                                     line=dict(color='orange', width=3),
-                                     text=["", f"Anual: {p24_25:+.1f}%"], textposition="bottom center"))
+            fig.add_trace(go.Scatter(x=['2024', '2025'], y=[y_vals[3], y_vals[4]], mode='lines',
+                                     line=dict(color='orange', width=3), name=f"Var. Anual (24-25): {p24_25:+.1f}%"))
 
-            fig.update_layout(height=400, showlegend=False, margin=dict(t=50))
+            fig.update_layout(height=400, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown(f"""
+                <div class="legenda-container">
+                    <span><b style="color:red;">---</b> Var. 2021-2025: <b>{p21_25:+.1f}%</b></span>
+                    <span><b style="color:orange;">──</b> Var. 2024-2025: <b>{p24_25:+.1f}%</b></span>
+                </div>
+            """, unsafe_allow_html=True)
             
             if casa_sel == "Todas as Localidades":
                 st.dataframe(df[['LOCALIDADE_REF'] + anos].set_index('LOCALIDADE_REF'), use_container_width=True)
@@ -110,17 +115,21 @@ if files:
         cor_bola = "dot-green" if status_pos else "dot-red"
         bola_html = f'<span class="dot {cor_bola}"></span>'
 
-        # Lógica de Médias Regional para a Tabela
+        # Lógica dinâmica da Tabela de Farol
         m_jdi = "35.50" if especial == "per_capta" else "-"
         
-        resumo_farol.append({
+        item_farol = {
             "Indicador": titulo,
             "Farol": bola_html,
-            "Média Local 2026": f"{m26:.2f}",
             "Var. 25/26": f"{var:+.1f}%",
             "Média Várzea (Regional)": f"{media_varzea_2026:.2f}",
             "Média Jundiaí": m_jdi
-        })
+        }
+        # Adiciona Média Local apenas se não for "Todas as Localidades"
+        if casa_sel != "Todas as Localidades":
+            item_farol["Média Local 2026"] = f"{m26:.2f}"
+            
+        resumo_farol.append(item_farol)
 
         st.markdown(f"**{titulo}**")
         fig = go.Figure()
@@ -131,13 +140,13 @@ if files:
         fig.add_trace(go.Bar(x=meses_sel, y=[dados.get(m, 0) for m in meses_sel], marker_color='#3498db'))
         
         if especial == "per_capta":
-            fig.add_hline(y=media_varzea_2026, line_dash="dash", line_color="orange", annotation_text="Média Várzea")
-            fig.add_hline(y=35.50, line_dash="dot", line_color="red", annotation_text="Regional Jdi")
+            fig.add_hline(y=media_varzea_2026, line_dash="dash", line_color="orange", annotation_text=f"{media_varzea_2026:.2f}")
+            fig.add_hline(y=35.50, line_dash="dot", line_color="red", annotation_text="35.50")
 
         fig.update_layout(height=280, barmode='group', showlegend=False, margin=dict(l=10,r=10,t=20,b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-    # Renderização Grid
+    # Renderização
     c1, c2 = st.columns(2)
     with c1: criar_grafico("Água e Esgoto", "Água")
     with c2: criar_grafico("Energia Elétrica", "Energia")
@@ -150,15 +159,19 @@ if files:
     with c5: criar_grafico("Coletas Total", "Total", is_gasto=False)
     with c6: criar_grafico("Per Capta", "Per Capta", is_gasto=False, especial="per_capta")
 
-    # --- TABELA DE FAROL (Ajustada) ---
+    # --- TABELA DE FAROL AJUSTADA ---
     st.subheader("🚩 Farol de Performance")
     if resumo_farol:
         df_farol = pd.DataFrame(resumo_farol)
-        st.write(df_farol.to_html(escape=False, index=False), unsafe_allow_html=True)
+        # Reordenar para garantir estética (Média Local primeiro se existir)
+        cols = list(df_farol.columns)
+        if "Média Local 2026" in cols:
+            cols.insert(2, cols.pop(cols.index("Média Local 2026")))
+        st.write(df_farol[cols].to_html(escape=False, index=False), unsafe_allow_html=True)
 
     st.divider()
     st.subheader("📊 Evolução Santa Ceia")
     criar_grafico("Santa Ceia", "Santa Ceia", especial="santa_ceia")
 
 else:
-    st.info("Aguardando upload dos arquivos.")
+    st.info("Aguardando upload do arquivo Excel.")
